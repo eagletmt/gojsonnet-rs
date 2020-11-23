@@ -16,28 +16,99 @@ pub enum Error {
     },
 }
 
+pub type NativeCallback = fn(argv: Vec<serde_json::Value>) -> Option<serde_json::Value>;
+
 #[repr(C)]
 struct NativeCallbackHolder {
     vm: *mut gojsonnet_sys::JsonnetVm,
-    callback: unsafe fn(
-        vm: *mut gojsonnet_sys::JsonnetVm,
-        argv: *const *const gojsonnet_sys::JsonnetJsonValue,
-    ) -> Option<*mut gojsonnet_sys::JsonnetJsonValue>,
+    callback: NativeCallback,
 }
 unsafe extern "C" fn native_callback_bridge(
     ctx: *mut std::ffi::c_void,
-    argv: *const *const gojsonnet_sys::JsonnetJsonValue,
+    argv_c: *const *const gojsonnet_sys::JsonnetJsonValue,
     success: *mut i32,
 ) -> *mut gojsonnet_sys::JsonnetJsonValue {
     let holder = ctx as *mut NativeCallbackHolder;
     let vm = (*holder).vm;
     let callback = (*holder).callback;
-    if let Some(result) = callback(vm, argv) {
+    let mut argv = Vec::new();
+    let mut i = 0;
+    while !(*argv_c.offset(i)).is_null() {
+        argv.push(from_gojsonnet_value(
+            vm,
+            *argv_c.offset(i) as *mut gojsonnet_sys::JsonnetJsonValue,
+        ));
+        i += 1;
+    }
+    if let Some(result) = callback(argv) {
         *success = 1;
-        result
+        from_serde_json_value(vm, result)
     } else {
         gojsonnet_sys::jsonnet_json_make_null(vm)
     }
+}
+
+unsafe fn from_serde_json_value(
+    vm: *mut gojsonnet_sys::JsonnetVm,
+    value: serde_json::Value,
+) -> *mut gojsonnet_sys::JsonnetJsonValue {
+    match value {
+        serde_json::Value::Null => gojsonnet_sys::jsonnet_json_make_null(vm),
+        serde_json::Value::Bool(b) => gojsonnet_sys::jsonnet_json_make_bool(vm, b.into()),
+        serde_json::Value::Number(n) => {
+            gojsonnet_sys::jsonnet_json_make_number(vm, n.as_f64().unwrap())
+        }
+        serde_json::Value::String(s) => gojsonnet_sys::jsonnet_json_make_string(
+            vm,
+            std::ffi::CString::new(s).unwrap().into_raw(),
+        ),
+        serde_json::Value::Array(v) => {
+            let ary = gojsonnet_sys::jsonnet_json_make_array(vm);
+            for e in v {
+                gojsonnet_sys::jsonnet_json_array_append(vm, ary, from_serde_json_value(vm, e));
+            }
+            ary
+        }
+        serde_json::Value::Object(m) => {
+            let obj = gojsonnet_sys::jsonnet_json_make_object(vm);
+            for (k, v) in m {
+                gojsonnet_sys::jsonnet_json_object_append(
+                    vm,
+                    obj,
+                    std::ffi::CString::new(k).unwrap().into_raw(),
+                    from_serde_json_value(vm, v),
+                );
+            }
+            obj
+        }
+    }
+}
+
+unsafe fn from_gojsonnet_value(
+    vm: *mut gojsonnet_sys::JsonnetVm,
+    value: *mut gojsonnet_sys::JsonnetJsonValue,
+) -> serde_json::Value {
+    if gojsonnet_sys::jsonnet_json_extract_null(vm, value) != 0 {
+        return serde_json::Value::Null;
+    }
+    let b = gojsonnet_sys::jsonnet_json_extract_bool(vm, value);
+    if b == 0 {
+        return serde_json::Value::Bool(false);
+    } else if b == 1 {
+        return serde_json::Value::Bool(true);
+    }
+    let mut n = 0.0;
+    if gojsonnet_sys::jsonnet_json_extract_number(vm, value, &mut n) != 0 {
+        return serde_json::Value::Number(serde_json::Number::from_f64(n).unwrap());
+    }
+    let c_str = gojsonnet_sys::jsonnet_json_extract_string(vm, value);
+    if !c_str.is_null() {
+        let s = std::ffi::CStr::from_ptr(c_str).to_str().unwrap().to_owned();
+        return serde_json::Value::String(s);
+    }
+    // XXX: array and object?
+
+    panic!("Unsupported value: {:?}", value);
 }
 
 impl JsonnetVm {
@@ -80,10 +151,7 @@ impl JsonnetVm {
         &mut self,
         name: &str,
         params: &[&str],
-        callback: unsafe fn(
-            vm: *mut gojsonnet_sys::JsonnetVm,
-            argv: *const *const gojsonnet_sys::JsonnetJsonValue,
-        ) -> Option<*mut gojsonnet_sys::JsonnetJsonValue>,
+        callback: NativeCallback,
     ) -> Result<(), Error> {
         let name_ptr = std::ffi::CString::new(name)?.into_raw();
         let mut params_c = Vec::with_capacity(params.len());
@@ -159,19 +227,9 @@ mod tests {
     #[test]
     fn native_callback_ok() {
         let mut vm = super::JsonnetVm::default();
-        vm.native_callback("hello", &["arg1"], |vm, argv| unsafe {
-            let arg1_c = gojsonnet_sys::jsonnet_json_extract_string(
-                vm,
-                *argv as *mut gojsonnet_sys::JsonnetJsonValue,
-            );
-            let arg1 = std::ffi::CStr::from_ptr(arg1_c).to_str().unwrap();
-            let message = gojsonnet_sys::jsonnet_json_make_string(
-                vm,
-                std::ffi::CString::new(format!("hello {}", arg1))
-                    .unwrap()
-                    .into_raw(),
-            );
-            Some(message)
+        vm.native_callback("hello", &["arg1"], |argv| {
+            let arg1 = argv[0].as_str().unwrap();
+            Some(serde_json::json!(format!("hello {}", arg1)))
         })
         .unwrap();
         let json_str = vm
