@@ -193,7 +193,8 @@ impl Default for JsonnetVm {
 mod tests {
     #[test]
     fn it_works() {
-        assert!(!super::JsonnetVm::library_version().is_empty());
+        let v = super::JsonnetVm::library_version();
+        assert!(!v.is_empty(), "v = {:?}, v");
     }
 
     #[test]
@@ -220,10 +221,13 @@ mod tests {
         let e = vm
             .evaluate_snippet("evaluate_snippet_syntax_error.jsonnet", "{foo: bar}")
             .unwrap_err();
-        assert!(e
-            .to_string()
-            .starts_with("go-jsonnet returned error: evaluate_snippet_syntax_error.jsonnet:1:"));
-        assert!(e.to_string().contains("Unknown variable"));
+        assert!(
+            e.to_string()
+                .starts_with("go-jsonnet returned error: evaluate_snippet_syntax_error.jsonnet:1:"),
+            "e = {}",
+            e
+        );
+        assert!(e.to_string().contains("Unknown variable"), "e = {}", e);
     }
 
     #[test]
