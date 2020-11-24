@@ -1,5 +1,5 @@
 /// Interpreter for Jsonnet.
-pub struct JsonnetVm {
+pub struct Vm {
     inner: *mut gojsonnet_sys::JsonnetVm,
 }
 
@@ -111,7 +111,7 @@ unsafe fn from_gojsonnet_value(
     panic!("Unsupported value: {:?}", value);
 }
 
-impl JsonnetVm {
+impl Vm {
     /// Create a new interpreter.
     pub fn new() -> Self {
         Self {
@@ -177,13 +177,13 @@ impl JsonnetVm {
         Ok(())
     }
 }
-impl Drop for JsonnetVm {
+impl Drop for Vm {
     fn drop(&mut self) {
         unsafe { gojsonnet_sys::jsonnet_destroy(self.inner) };
     }
 }
 
-impl Default for JsonnetVm {
+impl Default for Vm {
     fn default() -> Self {
         Self::new()
     }
@@ -193,13 +193,13 @@ impl Default for JsonnetVm {
 mod tests {
     #[test]
     fn it_works() {
-        let v = super::JsonnetVm::library_version();
+        let v = super::Vm::library_version();
         assert!(!v.is_empty(), "v = {:?}, v");
     }
 
     #[test]
     fn evaluate_snippet_ok() {
-        let vm = super::JsonnetVm::default();
+        let vm = super::Vm::default();
         let json_str = vm
             .evaluate_snippet(
                 "evaluate_snippet_ok.jsonnet",
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn evaluate_snippet_syntax_error() {
-        let vm = super::JsonnetVm::default();
+        let vm = super::Vm::default();
         let e = vm
             .evaluate_snippet("evaluate_snippet_syntax_error.jsonnet", "{foo: bar}")
             .unwrap_err();
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn native_callback_ok() {
-        let mut vm = super::JsonnetVm::default();
+        let mut vm = super::Vm::default();
         vm.native_callback("hello", &["arg1"], |argv| {
             let arg1 = argv[0].as_str().unwrap();
             Some(serde_json::json!(format!("hello {}", arg1)))
