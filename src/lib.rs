@@ -122,7 +122,7 @@ impl JsonnetVm {
     /// Return the version of underlying google/go-jsonnet library.
     pub fn library_version() -> String {
         let version_cstr = unsafe { std::ffi::CStr::from_ptr(gojsonnet_sys::jsonnet_version()) };
-        version_cstr.to_str().unwrap().to_owned()
+        version_cstr.to_string_lossy().into_owned()
     }
 
     /// Evaluate a Jsonnet code and return a JSON string.
@@ -130,15 +130,17 @@ impl JsonnetVm {
         let filename_ptr = std::ffi::CString::new(filename)?.into_raw();
         let code_ptr = std::ffi::CString::new(code)?.into_raw();
         let mut err = 0;
-        let result_cstr = unsafe {
-            std::ffi::CStr::from_ptr(gojsonnet_sys::jsonnet_evaluate_snippet(
+        let result = unsafe {
+            let ptr = gojsonnet_sys::jsonnet_evaluate_snippet(
                 self.inner,
                 filename_ptr,
                 code_ptr,
                 &mut err,
-            ))
+            );
+            let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            gojsonnet_sys::jsonnet_realloc(self.inner, ptr, 0);
+            s
         };
-        let result = result_cstr.to_str().unwrap().to_owned();
         if err == 0 {
             Ok(result)
         } else {
