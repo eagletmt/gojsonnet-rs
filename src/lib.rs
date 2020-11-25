@@ -176,6 +176,14 @@ impl Vm {
         };
         Ok(())
     }
+
+    /// Bind a Jsonnet external variable to the given string.
+    pub fn ext_var(&mut self, key: &str, val: &str) -> Result<(), Error> {
+        let key_ptr = std::ffi::CString::new(key)?.into_raw();
+        let val_ptr = std::ffi::CString::new(val)?.into_raw();
+        unsafe { gojsonnet_sys::jsonnet_ext_var(self.inner, key_ptr, val_ptr) };
+        Ok(())
+    }
 }
 impl Drop for Vm {
     fn drop(&mut self) {
@@ -253,6 +261,26 @@ mod tests {
             s,
             S {
                 message: "hello world".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn ext_var_ok() {
+        let mut vm = super::Vm::default();
+        vm.ext_var("appId", "gojsonnet").unwrap();
+        let json_str = vm
+            .evaluate_snippet("ext_var_ok.jsonnet", "{ e: std.extVar('appId') }")
+            .unwrap();
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct S {
+            e: String,
+        }
+        let s: S = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(
+            s,
+            S {
+                e: "gojsonnet".to_owned()
             }
         );
     }
