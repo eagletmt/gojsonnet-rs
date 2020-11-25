@@ -111,6 +111,55 @@ unsafe fn from_gojsonnet_value(
     panic!("Unsupported value: {:?}", value);
 }
 
+/// Result of the imported content.
+pub struct ImportedContent {
+    /// Path to the imported file, absolute or relative to the process's CWD.
+    pub found_here: String,
+    /// Content of the imported file
+    pub content: String,
+}
+pub type ImportCallback = fn(base: &str, base: &str) -> Result<ImportedContent, String>;
+
+#[repr(C)]
+struct ImportCallbackHolder {
+    vm: *mut gojsonnet_sys::JsonnetVm,
+    callback: ImportCallback,
+}
+unsafe extern "C" fn import_callback_bridge(
+    ctx: *mut std::ffi::c_void,
+    base: *const std::os::raw::c_char,
+    rel: *const std::os::raw::c_char,
+    found_here: *mut *mut std::os::raw::c_char,
+    success: *mut std::os::raw::c_int,
+) -> *mut std::os::raw::c_char {
+    let holder = ctx as *mut ImportCallbackHolder;
+    let vm = (*holder).vm;
+    let callback = (*holder).callback;
+    let base = std::ffi::CStr::from_ptr(base).to_string_lossy();
+    let rel = std::ffi::CStr::from_ptr(rel).to_string_lossy();
+    use std::borrow::Borrow as _;
+    match callback(base.borrow(), rel.borrow()) {
+        Ok(imported_content) => {
+            *success = 1;
+            *found_here = to_jsonnet_str(vm, &imported_content.found_here);
+            to_jsonnet_str(vm, &imported_content.content)
+        }
+        Err(e) => {
+            *success = 0;
+            to_jsonnet_str(vm, &e)
+        }
+    }
+}
+unsafe fn to_jsonnet_str(
+    vm: *mut gojsonnet_sys::JsonnetVm,
+    rust_str: &str,
+) -> *mut std::os::raw::c_char {
+    let dst = gojsonnet_sys::jsonnet_realloc(vm, std::ptr::null_mut(), rust_str.len() as u64 + 1);
+    std::ptr::copy_nonoverlapping(rust_str.as_ptr(), dst as *mut u8, rust_str.len());
+    *dst.offset(rust_str.len() as isize) = 0;
+    dst
+}
+
 impl Vm {
     /// Create a new interpreter.
     pub fn new() -> Self {
@@ -123,6 +172,30 @@ impl Vm {
     pub fn library_version() -> String {
         let version_cstr = unsafe { std::ffi::CStr::from_ptr(gojsonnet_sys::jsonnet_version()) };
         version_cstr.to_string_lossy().into_owned()
+    }
+
+    /// Set the maximum stack depth.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.max_stack(10);
+    /// ```
+    pub fn max_stack(&mut self, v: u32) {
+        unsafe { gojsonnet_sys::jsonnet_max_stack(self.inner, v) };
+    }
+
+    /// Expect a string as output and don't JSON encode it.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.string_output(true);
+    /// let output = vm
+    ///     .evaluate_snippet("string_output.jsonnet", r#"'hello "world"'"#)
+    ///     .unwrap();
+    /// assert_eq!(output, "hello \"world\"\n");
+    /// ```
+    pub fn string_output(&mut self, v: bool) {
+        unsafe { gojsonnet_sys::jsonnet_string_output(self.inner, v.into()) };
     }
 
     /// Evaluate a Jsonnet code and return a JSON string.
@@ -225,19 +298,19 @@ impl Vm {
     ///
     /// ```rust
     /// let mut vm = gojsonnet::Vm::default();
-    /// vm.ext_var("appId", "gojsonnet").unwrap();
+    /// vm.ext_var("v", "true").unwrap();
     /// let json_str = vm
-    ///     .evaluate_snippet("ext_var.jsonnet", "{ e: std.extVar('appId') }")
+    ///     .evaluate_snippet("ext_var.jsonnet", "{ v: std.extVar('v') }")
     ///     .unwrap();
     /// #[derive(Debug, PartialEq, serde::Deserialize)]
     /// struct S {
-    ///     e: String,
+    ///     v: String,
     /// }
     /// let s: S = serde_json::from_str(&json_str).unwrap();
     /// assert_eq!(
     ///     s,
     ///     S {
-    ///         e: "gojsonnet".to_owned()
+    ///         v: "true".to_owned()
     ///     }
     /// );
     /// ```
@@ -246,6 +319,119 @@ impl Vm {
         let val_ptr = std::ffi::CString::new(val)?.into_raw();
         unsafe { gojsonnet_sys::jsonnet_ext_var(self.inner, key_ptr, val_ptr) };
         Ok(())
+    }
+
+    /// Bind a Jsonnet external variable to the given code.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.ext_code("v", "true").unwrap();
+    /// let json_str = vm
+    ///     .evaluate_snippet("ext_code.jsonnet", "{ v: std.extVar('v') }")
+    ///     .unwrap();
+    /// #[derive(Debug, PartialEq, serde::Deserialize)]
+    /// struct S {
+    ///     v: bool,
+    /// }
+    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// assert_eq!(s, S { v: true });
+    /// ```
+    pub fn ext_code(&mut self, key: &str, val: &str) -> Result<(), Error> {
+        let key_ptr = std::ffi::CString::new(key)?.into_raw();
+        let val_ptr = std::ffi::CString::new(val)?.into_raw();
+        unsafe { gojsonnet_sys::jsonnet_ext_code(self.inner, key_ptr, val_ptr) };
+        Ok(())
+    }
+
+    /// Bind a Jsonnet top-level variable to the given string.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.tla_var("v", "true").unwrap();
+    /// let json_str = vm
+    ///     .evaluate_snippet("tla_var.jsonnet", "function(v) { v: v }")
+    ///     .unwrap();
+    /// #[derive(Debug, PartialEq, serde::Deserialize)]
+    /// struct S {
+    ///     v: String,
+    /// }
+    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// assert_eq!(
+    ///     s,
+    ///     S {
+    ///         v: "true".to_owned()
+    ///     }
+    /// );
+    /// ```
+    pub fn tla_var(&mut self, key: &str, val: &str) -> Result<(), Error> {
+        let key_ptr = std::ffi::CString::new(key)?.into_raw();
+        let val_ptr = std::ffi::CString::new(val)?.into_raw();
+        unsafe { gojsonnet_sys::jsonnet_tla_var(self.inner, key_ptr, val_ptr) };
+        Ok(())
+    }
+
+    /// Bind a Jsonnet top-level variable to the given code.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.tla_code("v", "true").unwrap();
+    /// let json_str = vm
+    ///     .evaluate_snippet("tla_code.jsonnet", "function(v) { v: v }")
+    ///     .unwrap();
+    /// #[derive(Debug, PartialEq, serde::Deserialize)]
+    /// struct S {
+    ///     v: bool,
+    /// }
+    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// assert_eq!(s, S { v: true });
+    /// ```
+    pub fn tla_code(&mut self, key: &str, val: &str) -> Result<(), Error> {
+        let key_ptr = std::ffi::CString::new(key)?.into_raw();
+        let val_ptr = std::ffi::CString::new(val)?.into_raw();
+        unsafe { gojsonnet_sys::jsonnet_tla_code(self.inner, key_ptr, val_ptr) };
+        Ok(())
+    }
+
+    /// Add to the default import callback's library search path.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.jpath_add("/path/to/libsonnets");
+    /// ```
+    pub fn jpath_add(&mut self, path: &str) -> Result<(), Error> {
+        let path_ptr = std::ffi::CString::new(path)?.into_raw();
+        unsafe { gojsonnet_sys::jsonnet_jpath_add(self.inner, path_ptr) };
+        Ok(())
+    }
+
+    /// Override the callback used to locate imports.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.import_callback(|base, rel| {
+    ///     Ok(gojsonnet::ImportedContent {
+    ///         found_here: "import_callback.libsonnet".to_owned(),
+    ///         content: "1 + 2".to_owned(),
+    ///     })
+    /// });
+    /// let json_str = vm
+    ///     .evaluate_snippet("import_callback.jsonnet", "[import 'foo.libsonnet']")
+    ///     .unwrap();
+    /// let s: Vec<i32> = serde_json::from_str(&json_str).unwrap();
+    /// assert_eq!(s, vec![3]);
+    /// ```
+    pub fn import_callback(&mut self, callback: ImportCallback) {
+        let holder = Box::into_raw(Box::new(ImportCallbackHolder {
+            vm: self.inner,
+            callback,
+        }));
+        unsafe {
+            gojsonnet_sys::jsonnet_import_callback(
+                self.inner,
+                Some(import_callback_bridge),
+                holder as *mut std::ffi::c_void,
+            )
+        };
     }
 }
 impl Drop for Vm {
