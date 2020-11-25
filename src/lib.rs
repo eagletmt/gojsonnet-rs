@@ -22,6 +22,7 @@ pub type NativeCallback = fn(argv: Vec<serde_json::Value>) -> Option<serde_json:
 struct NativeCallbackHolder {
     vm: *mut gojsonnet_sys::JsonnetVm,
     callback: NativeCallback,
+    argc: usize,
 }
 unsafe extern "C" fn native_callback_bridge(
     ctx: *mut std::ffi::c_void,
@@ -31,14 +32,13 @@ unsafe extern "C" fn native_callback_bridge(
     let holder = ctx as *mut NativeCallbackHolder;
     let vm = (*holder).vm;
     let callback = (*holder).callback;
-    let mut argv = Vec::new();
-    let mut i = 0;
-    while !(*argv_c.offset(i)).is_null() {
+    let argc = (*holder).argc;
+    let mut argv = Vec::with_capacity(argc);
+    for i in 0..argc {
         argv.push(from_gojsonnet_value(
             vm,
-            *argv_c.offset(i) as *mut gojsonnet_sys::JsonnetJsonValue,
+            *argv_c.offset(i as isize) as *mut gojsonnet_sys::JsonnetJsonValue,
         ));
-        i += 1;
     }
     if let Some(result) = callback(argv) {
         *success = 1;
@@ -164,6 +164,7 @@ impl Vm {
         let holder = Box::into_raw(Box::new(NativeCallbackHolder {
             vm: self.inner,
             callback,
+            argc: params.len(),
         }));
         unsafe {
             gojsonnet_sys::jsonnet_native_callback(
