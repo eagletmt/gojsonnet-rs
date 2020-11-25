@@ -126,6 +126,23 @@ impl Vm {
     }
 
     /// Evaluate a Jsonnet code and return a JSON string.
+    ///
+    /// ```rust
+    /// let vm = gojsonnet::Vm::default();
+    /// let json_str = vm
+    ///     .evaluate_snippet(
+    ///         "evaluate_snippet.jsonnet",
+    ///         "{foo: 1+2, bar: std.isBoolean(false)}",
+    ///     )
+    ///     .unwrap();
+    /// #[derive(Debug, PartialEq, serde::Deserialize)]
+    /// struct S {
+    ///     foo: i32,
+    ///     bar: bool,
+    /// }
+    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// assert_eq!(s, S { foo: 3, bar: true });
+    /// ```
     pub fn evaluate_snippet(&self, filename: &str, code: &str) -> Result<String, Error> {
         let filename_ptr = std::ffi::CString::new(filename)?.into_raw();
         let code_ptr = std::ffi::CString::new(code)?.into_raw();
@@ -149,6 +166,32 @@ impl Vm {
     }
 
     /// Register a native function to the interpreter.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.native_callback("hello", &["arg1"], |argv| {
+    ///     let arg1 = argv[0].as_str().unwrap();
+    ///     Some(serde_json::json!(format!("hello {}", arg1)))
+    /// })
+    /// .unwrap();
+    /// let json_str = vm
+    ///     .evaluate_snippet(
+    ///         "native_callback.jsonnet",
+    ///         r#"local hello = std.native("hello"); {message: hello("world")}"#,
+    ///     )
+    ///     .unwrap();
+    /// #[derive(Debug, PartialEq, serde::Deserialize)]
+    /// struct S {
+    ///     message: String,
+    /// }
+    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// assert_eq!(
+    ///     s,
+    ///     S {
+    ///         message: "hello world".to_owned()
+    ///     }
+    /// );
+    /// ```
     pub fn native_callback(
         &mut self,
         name: &str,
@@ -179,6 +222,25 @@ impl Vm {
     }
 
     /// Bind a Jsonnet external variable to the given string.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.ext_var("appId", "gojsonnet").unwrap();
+    /// let json_str = vm
+    ///     .evaluate_snippet("ext_var.jsonnet", "{ e: std.extVar('appId') }")
+    ///     .unwrap();
+    /// #[derive(Debug, PartialEq, serde::Deserialize)]
+    /// struct S {
+    ///     e: String,
+    /// }
+    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// assert_eq!(
+    ///     s,
+    ///     S {
+    ///         e: "gojsonnet".to_owned()
+    ///     }
+    /// );
+    /// ```
     pub fn ext_var(&mut self, key: &str, val: &str) -> Result<(), Error> {
         let key_ptr = std::ffi::CString::new(key)?.into_raw();
         let val_ptr = std::ffi::CString::new(val)?.into_raw();
@@ -207,24 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_snippet_ok() {
-        let vm = super::Vm::default();
-        let json_str = vm
-            .evaluate_snippet(
-                "evaluate_snippet_ok.jsonnet",
-                "{foo: 1+2, bar: std.isBoolean(false)}",
-            )
-            .unwrap();
-        #[derive(Debug, PartialEq, serde::Deserialize)]
-        struct S {
-            foo: i32,
-            bar: bool,
-        }
-        let s: S = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(s, S { foo: 3, bar: true });
-    }
-
-    #[test]
     fn evaluate_snippet_syntax_error() {
         let vm = super::Vm::default();
         let e = vm
@@ -237,52 +281,5 @@ mod tests {
             e
         );
         assert!(e.to_string().contains("Unknown variable"), "e = {}", e);
-    }
-
-    #[test]
-    fn native_callback_ok() {
-        let mut vm = super::Vm::default();
-        vm.native_callback("hello", &["arg1"], |argv| {
-            let arg1 = argv[0].as_str().unwrap();
-            Some(serde_json::json!(format!("hello {}", arg1)))
-        })
-        .unwrap();
-        let json_str = vm
-            .evaluate_snippet(
-                "native_callback_ok.jsonnet",
-                r#"local hello = std.native("hello"); {message: hello("world")}"#,
-            )
-            .unwrap();
-        #[derive(Debug, PartialEq, serde::Deserialize)]
-        struct S {
-            message: String,
-        }
-        let s: S = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(
-            s,
-            S {
-                message: "hello world".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn ext_var_ok() {
-        let mut vm = super::Vm::default();
-        vm.ext_var("appId", "gojsonnet").unwrap();
-        let json_str = vm
-            .evaluate_snippet("ext_var_ok.jsonnet", "{ e: std.extVar('appId') }")
-            .unwrap();
-        #[derive(Debug, PartialEq, serde::Deserialize)]
-        struct S {
-            e: String,
-        }
-        let s: S = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(
-            s,
-            S {
-                e: "gojsonnet".to_owned()
-            }
-        );
     }
 }
