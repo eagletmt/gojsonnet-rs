@@ -5,7 +5,7 @@ pub struct Vm {
     import_callback_holder: Option<*mut ImportCallbackHolder>,
 }
 
-#[derive(Debug, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Error returned from Jsonnet interpreter.
     #[error("go-jsonnet returned error: {message}")]
@@ -15,6 +15,12 @@ pub enum Error {
     NulError {
         #[from]
         inner: std::ffi::NulError,
+    },
+    /// Error while deserializing JSON returned from jsonnet_evaluate_snippet API.
+    #[error("Serde error: {inner}")]
+    SerdeError {
+        #[from]
+        inner: serde_json::Error,
     },
 }
 
@@ -62,7 +68,7 @@ unsafe fn from_serde_json_value(
         }
         serde_json::Value::String(s) => gojsonnet_sys::jsonnet_json_make_string(
             vm,
-            std::ffi::CString::new(s).unwrap().as_ptr() as *mut i8, // v is originally declared as "const char *"
+            std::ffi::CString::new(s).unwrap().as_ptr() as *mut i8, /* v is originally declared as "const char *" */
         ),
         serde_json::Value::Array(v) => {
             let ary = gojsonnet_sys::jsonnet_json_make_array(vm);
@@ -77,7 +83,7 @@ unsafe fn from_serde_json_value(
                 gojsonnet_sys::jsonnet_json_object_append(
                     vm,
                     obj,
-                    std::ffi::CString::new(k).unwrap().as_ptr() as *mut i8, // f is originally declared as "const char *"
+                    std::ffi::CString::new(k).unwrap().as_ptr() as *mut i8, /* f is originally declared as "const char *" */
                     from_serde_json_value(vm, v),
                 );
             }
@@ -188,57 +194,47 @@ impl Vm {
         unsafe { gojsonnet_sys::jsonnet_max_stack(self.inner, v) };
     }
 
-    /// Expect a string as output and don't JSON encode it.
-    ///
-    /// ```rust
-    /// let mut vm = gojsonnet::Vm::default();
-    /// vm.string_output(true);
-    /// let output = vm
-    ///     .evaluate_snippet("string_output.jsonnet", r#"'hello "world"'"#)
-    ///     .unwrap();
-    /// assert_eq!(output, "hello \"world\"\n");
-    /// ```
-    pub fn string_output(&mut self, v: bool) {
-        unsafe { gojsonnet_sys::jsonnet_string_output(self.inner, v.into()) };
-    }
-
     /// Evaluate a Jsonnet code and return a JSON string.
     ///
     /// ```rust
     /// let vm = gojsonnet::Vm::default();
-    /// let json_str = vm
-    ///     .evaluate_snippet(
-    ///         "evaluate_snippet.jsonnet",
-    ///         "{foo: 1+2, bar: std.isBoolean(false)}",
-    ///     )
-    ///     .unwrap();
     /// #[derive(Debug, PartialEq, serde::Deserialize)]
     /// struct S {
     ///     foo: i32,
     ///     bar: bool,
     /// }
-    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// let s: S = vm
+    ///     .evaluate_snippet(
+    ///         "evaluate_snippet.jsonnet",
+    ///         "{foo: 1+2, bar: std.isBoolean(false)}",
+    ///     )
+    ///     .unwrap();
     /// assert_eq!(s, S { foo: 3, bar: true });
     /// ```
-    pub fn evaluate_snippet(&self, filename: &str, code: &str) -> Result<String, Error> {
+    pub fn evaluate_snippet<T>(&self, filename: &str, code: &str) -> Result<T, Error>
+    where
+        T: serde::de::DeserializeOwned,
+    {
         let filename_cstr = std::ffi::CString::new(filename)?;
         let code_cstr = std::ffi::CString::new(code)?;
         let mut err = 0;
-        let result = unsafe {
+        unsafe {
             let ptr = gojsonnet_sys::jsonnet_evaluate_snippet(
                 self.inner,
-                filename_cstr.as_ptr() as *mut i8, // filename is originally declared as "const char *"
+                filename_cstr.as_ptr() as *mut i8, /* filename is originally declared as "const char *" */
                 code_cstr.as_ptr() as *mut i8, // filename is originally declared as "const char *"
                 &mut err,
             );
-            let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
-            gojsonnet_sys::jsonnet_realloc(self.inner, ptr, 0);
-            s
-        };
-        if err == 0 {
-            Ok(result)
-        } else {
-            Err(Error::GoJsonnetError { message: result })
+            let json_str = std::ffi::CStr::from_ptr(ptr).to_string_lossy();
+            if err == 0 {
+                let result = serde_json::from_str(&json_str);
+                gojsonnet_sys::jsonnet_realloc(self.inner, ptr, 0);
+                Ok(result?)
+            } else {
+                let message = json_str.into_owned();
+                gojsonnet_sys::jsonnet_realloc(self.inner, ptr, 0);
+                Err(Error::GoJsonnetError { message })
+            }
         }
     }
 
@@ -251,17 +247,16 @@ impl Vm {
     ///     Some(serde_json::json!(format!("hello {}", arg1)))
     /// })
     /// .unwrap();
-    /// let json_str = vm
+    /// #[derive(Debug, PartialEq, serde::Deserialize)]
+    /// struct S {
+    ///     message: String,
+    /// }
+    /// let s: S = vm
     ///     .evaluate_snippet(
     ///         "native_callback.jsonnet",
     ///         r#"local hello = std.native("hello"); {message: hello("world")}"#,
     ///     )
     ///     .unwrap();
-    /// #[derive(Debug, PartialEq, serde::Deserialize)]
-    /// struct S {
-    ///     message: String,
-    /// }
-    /// let s: S = serde_json::from_str(&json_str).unwrap();
     /// assert_eq!(
     ///     s,
     ///     S {
@@ -313,14 +308,13 @@ impl Vm {
     /// ```rust
     /// let mut vm = gojsonnet::Vm::default();
     /// vm.ext_var("v", "true").unwrap();
-    /// let json_str = vm
-    ///     .evaluate_snippet("ext_var.jsonnet", "{ v: std.extVar('v') }")
-    ///     .unwrap();
     /// #[derive(Debug, PartialEq, serde::Deserialize)]
     /// struct S {
     ///     v: String,
     /// }
-    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// let s: S = vm
+    ///     .evaluate_snippet("ext_var.jsonnet", "{ v: std.extVar('v') }")
+    ///     .unwrap();
     /// assert_eq!(
     ///     s,
     ///     S {
@@ -346,14 +340,13 @@ impl Vm {
     /// ```rust
     /// let mut vm = gojsonnet::Vm::default();
     /// vm.ext_code("v", "true").unwrap();
-    /// let json_str = vm
-    ///     .evaluate_snippet("ext_code.jsonnet", "{ v: std.extVar('v') }")
-    ///     .unwrap();
     /// #[derive(Debug, PartialEq, serde::Deserialize)]
     /// struct S {
     ///     v: bool,
     /// }
-    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// let s: S = vm
+    ///     .evaluate_snippet("ext_code.jsonnet", "{ v: std.extVar('v') }")
+    ///     .unwrap();
     /// assert_eq!(s, S { v: true });
     /// ```
     pub fn ext_code(&mut self, key: &str, val: &str) -> Result<(), Error> {
@@ -374,14 +367,13 @@ impl Vm {
     /// ```rust
     /// let mut vm = gojsonnet::Vm::default();
     /// vm.tla_var("v", "true").unwrap();
-    /// let json_str = vm
-    ///     .evaluate_snippet("tla_var.jsonnet", "function(v) { v: v }")
-    ///     .unwrap();
     /// #[derive(Debug, PartialEq, serde::Deserialize)]
     /// struct S {
     ///     v: String,
     /// }
-    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// let s: S = vm
+    ///     .evaluate_snippet("tla_var.jsonnet", "function(v) { v: v }")
+    ///     .unwrap();
     /// assert_eq!(
     ///     s,
     ///     S {
@@ -407,14 +399,13 @@ impl Vm {
     /// ```rust
     /// let mut vm = gojsonnet::Vm::default();
     /// vm.tla_code("v", "true").unwrap();
-    /// let json_str = vm
-    ///     .evaluate_snippet("tla_code.jsonnet", "function(v) { v: v }")
-    ///     .unwrap();
     /// #[derive(Debug, PartialEq, serde::Deserialize)]
     /// struct S {
     ///     v: bool,
     /// }
-    /// let s: S = serde_json::from_str(&json_str).unwrap();
+    /// let s: S = vm
+    ///     .evaluate_snippet("tla_code.jsonnet", "function(v) { v: v }")
+    ///     .unwrap();
     /// assert_eq!(s, S { v: true });
     /// ```
     pub fn tla_code(&mut self, key: &str, val: &str) -> Result<(), Error> {
@@ -455,10 +446,9 @@ impl Vm {
     ///         content: "1 + 2".to_owned(),
     ///     })
     /// });
-    /// let json_str = vm
+    /// let s: Vec<i32> = vm
     ///     .evaluate_snippet("import_callback.jsonnet", "[import 'foo.libsonnet']")
     ///     .unwrap();
-    /// let s: Vec<i32> = serde_json::from_str(&json_str).unwrap();
     /// assert_eq!(s, vec![3]);
     /// ```
     pub fn import_callback(&mut self, callback: ImportCallback) {
@@ -511,7 +501,7 @@ mod tests {
     fn evaluate_snippet_syntax_error() {
         let vm = super::Vm::default();
         let e = vm
-            .evaluate_snippet("evaluate_snippet_syntax_error.jsonnet", "{foo: bar}")
+            .evaluate_snippet::<()>("evaluate_snippet_syntax_error.jsonnet", "{foo: bar}")
             .unwrap_err();
         assert!(
             e.to_string()
