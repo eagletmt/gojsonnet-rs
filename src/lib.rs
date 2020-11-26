@@ -1,6 +1,8 @@
 /// Interpreter for Jsonnet.
 pub struct Vm {
     inner: *mut gojsonnet_sys::JsonnetVm,
+    native_callback_holders: std::collections::HashMap<String, *mut NativeCallbackHolder>,
+    import_callback_holder: Option<*mut ImportCallbackHolder>,
 }
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -165,6 +167,8 @@ impl Vm {
     pub fn new() -> Self {
         Self {
             inner: unsafe { gojsonnet_sys::jsonnet_make() },
+            native_callback_holders: std::collections::HashMap::new(),
+            import_callback_holder: None,
         }
     }
 
@@ -282,7 +286,11 @@ impl Vm {
             callback,
             argc: params.len(),
         }));
+        let old_holder = self.native_callback_holders.insert(name.to_owned(), holder);
         unsafe {
+            if let Some(old_holder) = old_holder {
+                Box::from_raw(old_holder);
+            }
             gojsonnet_sys::jsonnet_native_callback(
                 self.inner,
                 name_cstr.as_ptr() as *mut i8, // name is originally declared as "const char *"
@@ -458,7 +466,11 @@ impl Vm {
             vm: self.inner,
             callback,
         }));
+        let old_holder = self.import_callback_holder.replace(holder);
         unsafe {
+            if let Some(old_holder) = old_holder {
+                Box::from_raw(old_holder);
+            }
             gojsonnet_sys::jsonnet_import_callback(
                 self.inner,
                 Some(import_callback_bridge),
@@ -469,7 +481,15 @@ impl Vm {
 }
 impl Drop for Vm {
     fn drop(&mut self) {
-        unsafe { gojsonnet_sys::jsonnet_destroy(self.inner) };
+        unsafe {
+            for (_, holder) in self.native_callback_holders.drain() {
+                Box::from_raw(holder);
+            }
+            if let Some(holder) = self.import_callback_holder {
+                Box::from_raw(holder);
+            }
+            gojsonnet_sys::jsonnet_destroy(self.inner)
+        };
     }
 }
 
