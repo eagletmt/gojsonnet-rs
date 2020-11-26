@@ -60,7 +60,7 @@ unsafe fn from_serde_json_value(
         }
         serde_json::Value::String(s) => gojsonnet_sys::jsonnet_json_make_string(
             vm,
-            std::ffi::CString::new(s).unwrap().into_raw(),
+            std::ffi::CString::new(s).unwrap().as_ptr() as *mut i8, // v is originally declared as "const char *"
         ),
         serde_json::Value::Array(v) => {
             let ary = gojsonnet_sys::jsonnet_json_make_array(vm);
@@ -75,7 +75,7 @@ unsafe fn from_serde_json_value(
                 gojsonnet_sys::jsonnet_json_object_append(
                     vm,
                     obj,
-                    std::ffi::CString::new(k).unwrap().into_raw(),
+                    std::ffi::CString::new(k).unwrap().as_ptr() as *mut i8, // f is originally declared as "const char *"
                     from_serde_json_value(vm, v),
                 );
             }
@@ -217,14 +217,14 @@ impl Vm {
     /// assert_eq!(s, S { foo: 3, bar: true });
     /// ```
     pub fn evaluate_snippet(&self, filename: &str, code: &str) -> Result<String, Error> {
-        let filename_ptr = std::ffi::CString::new(filename)?.into_raw();
-        let code_ptr = std::ffi::CString::new(code)?.into_raw();
+        let filename_cstr = std::ffi::CString::new(filename)?;
+        let code_cstr = std::ffi::CString::new(code)?;
         let mut err = 0;
         let result = unsafe {
             let ptr = gojsonnet_sys::jsonnet_evaluate_snippet(
                 self.inner,
-                filename_ptr,
-                code_ptr,
+                filename_cstr.as_ptr() as *mut i8, // filename is originally declared as "const char *"
+                code_cstr.as_ptr() as *mut i8, // filename is originally declared as "const char *"
                 &mut err,
             );
             let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
@@ -271,7 +271,7 @@ impl Vm {
         params: &[&str],
         callback: NativeCallback,
     ) -> Result<(), Error> {
-        let name_ptr = std::ffi::CString::new(name)?.into_raw();
+        let name_cstr = std::ffi::CString::new(name)?;
         let mut params_c = Vec::with_capacity(params.len());
         for param in params {
             params_c.push(std::ffi::CString::new(*param)?.into_raw());
@@ -285,11 +285,17 @@ impl Vm {
         unsafe {
             gojsonnet_sys::jsonnet_native_callback(
                 self.inner,
-                name_ptr,
+                name_cstr.as_ptr() as *mut i8, // name is originally declared as "const char *"
                 Some(native_callback_bridge),
                 holder as *mut std::ffi::c_void,
                 params_c.as_mut_ptr(),
-            )
+            );
+            assert_eq!(params_c.pop(), Some(std::ptr::null_mut()));
+            for param_c in params_c {
+                if !param_c.is_null() {
+                    std::ffi::CString::from_raw(param_c);
+                }
+            }
         };
         Ok(())
     }
@@ -315,9 +321,15 @@ impl Vm {
     /// );
     /// ```
     pub fn ext_var(&mut self, key: &str, val: &str) -> Result<(), Error> {
-        let key_ptr = std::ffi::CString::new(key)?.into_raw();
-        let val_ptr = std::ffi::CString::new(val)?.into_raw();
-        unsafe { gojsonnet_sys::jsonnet_ext_var(self.inner, key_ptr, val_ptr) };
+        let key_cstr = std::ffi::CString::new(key)?;
+        let val_cstr = std::ffi::CString::new(val)?;
+        unsafe {
+            gojsonnet_sys::jsonnet_ext_var(
+                self.inner,
+                key_cstr.as_ptr() as *mut i8, // key is originally declared as "const char *"
+                val_cstr.as_ptr() as *mut i8, // val is originally declared as "const char *"
+            )
+        };
         Ok(())
     }
 
@@ -337,9 +349,15 @@ impl Vm {
     /// assert_eq!(s, S { v: true });
     /// ```
     pub fn ext_code(&mut self, key: &str, val: &str) -> Result<(), Error> {
-        let key_ptr = std::ffi::CString::new(key)?.into_raw();
-        let val_ptr = std::ffi::CString::new(val)?.into_raw();
-        unsafe { gojsonnet_sys::jsonnet_ext_code(self.inner, key_ptr, val_ptr) };
+        let key_cstr = std::ffi::CString::new(key)?;
+        let val_cstr = std::ffi::CString::new(val)?;
+        unsafe {
+            gojsonnet_sys::jsonnet_ext_code(
+                self.inner,
+                key_cstr.as_ptr() as *mut i8, // key is originally declared as "const char *"
+                val_cstr.as_ptr() as *mut i8, // val is originally declared as "const char *"
+            )
+        };
         Ok(())
     }
 
@@ -364,9 +382,15 @@ impl Vm {
     /// );
     /// ```
     pub fn tla_var(&mut self, key: &str, val: &str) -> Result<(), Error> {
-        let key_ptr = std::ffi::CString::new(key)?.into_raw();
-        let val_ptr = std::ffi::CString::new(val)?.into_raw();
-        unsafe { gojsonnet_sys::jsonnet_tla_var(self.inner, key_ptr, val_ptr) };
+        let key_cstr = std::ffi::CString::new(key)?;
+        let val_cstr = std::ffi::CString::new(val)?;
+        unsafe {
+            gojsonnet_sys::jsonnet_tla_var(
+                self.inner,
+                key_cstr.as_ptr() as *mut i8, // key is originally declared as "const char *"
+                val_cstr.as_ptr() as *mut i8, // val is originally declared as "const char *"
+            )
+        };
         Ok(())
     }
 
@@ -386,9 +410,15 @@ impl Vm {
     /// assert_eq!(s, S { v: true });
     /// ```
     pub fn tla_code(&mut self, key: &str, val: &str) -> Result<(), Error> {
-        let key_ptr = std::ffi::CString::new(key)?.into_raw();
-        let val_ptr = std::ffi::CString::new(val)?.into_raw();
-        unsafe { gojsonnet_sys::jsonnet_tla_code(self.inner, key_ptr, val_ptr) };
+        let key_cstr = std::ffi::CString::new(key)?;
+        let val_cstr = std::ffi::CString::new(val)?;
+        unsafe {
+            gojsonnet_sys::jsonnet_tla_code(
+                self.inner,
+                key_cstr.as_ptr() as *mut i8, // key is originally declared as "const char *"
+                val_cstr.as_ptr() as *mut i8, // val is originally declared as "const char *"
+            )
+        };
         Ok(())
     }
 
@@ -399,8 +429,11 @@ impl Vm {
     /// vm.jpath_add("/path/to/libsonnets");
     /// ```
     pub fn jpath_add(&mut self, path: &str) -> Result<(), Error> {
-        let path_ptr = std::ffi::CString::new(path)?.into_raw();
-        unsafe { gojsonnet_sys::jsonnet_jpath_add(self.inner, path_ptr) };
+        let path_cstr = std::ffi::CString::new(path)?;
+        unsafe {
+            // path is originally declared as "const char *"
+            gojsonnet_sys::jsonnet_jpath_add(self.inner, path_cstr.as_ptr() as *mut i8)
+        };
         Ok(())
     }
 
