@@ -37,16 +37,13 @@ unsafe extern "C" fn native_callback_bridge(
     argv_c: *const *const gojsonnet_sys::JsonnetJsonValue,
     success: *mut i32,
 ) -> *mut gojsonnet_sys::JsonnetJsonValue {
-    let holder = ctx as *mut NativeCallbackHolder;
+    let holder = ctx as *const NativeCallbackHolder;
     let vm = (*holder).vm;
     let callback = (*holder).callback;
     let argc = (*holder).argc;
     let mut argv = Vec::with_capacity(argc);
     for i in 0..argc {
-        argv.push(from_gojsonnet_value(
-            vm,
-            *argv_c.offset(i as isize) as *mut gojsonnet_sys::JsonnetJsonValue,
-        ));
+        argv.push(from_gojsonnet_value(vm, *argv_c.offset(i as isize)));
     }
     if let Some(result) = callback(argv) {
         *success = 1;
@@ -66,10 +63,9 @@ unsafe fn from_serde_json_value(
         serde_json::Value::Number(n) => {
             gojsonnet_sys::jsonnet_json_make_number(vm, n.as_f64().unwrap())
         }
-        serde_json::Value::String(s) => gojsonnet_sys::jsonnet_json_make_string(
-            vm,
-            std::ffi::CString::new(s).unwrap().as_ptr() as *mut i8, /* v is originally declared as "const char *" */
-        ),
+        serde_json::Value::String(s) => {
+            gojsonnet_sys::jsonnet_json_make_string(vm, std::ffi::CString::new(s).unwrap().as_ptr())
+        }
         serde_json::Value::Array(v) => {
             let ary = gojsonnet_sys::jsonnet_json_make_array(vm);
             for e in v {
@@ -83,7 +79,7 @@ unsafe fn from_serde_json_value(
                 gojsonnet_sys::jsonnet_json_object_append(
                     vm,
                     obj,
-                    std::ffi::CString::new(k).unwrap().as_ptr() as *mut i8, /* f is originally declared as "const char *" */
+                    std::ffi::CString::new(k).unwrap().as_ptr(),
                     from_serde_json_value(vm, v),
                 );
             }
@@ -94,7 +90,7 @@ unsafe fn from_serde_json_value(
 
 unsafe fn from_gojsonnet_value(
     vm: *mut gojsonnet_sys::JsonnetVm,
-    value: *mut gojsonnet_sys::JsonnetJsonValue,
+    value: *const gojsonnet_sys::JsonnetJsonValue,
 ) -> serde_json::Value {
     if gojsonnet_sys::jsonnet_json_extract_null(vm, value) != 0 {
         return serde_json::Value::Null;
@@ -140,7 +136,7 @@ unsafe extern "C" fn import_callback_bridge(
     found_here: *mut *mut std::os::raw::c_char,
     success: *mut std::os::raw::c_int,
 ) -> *mut std::os::raw::c_char {
-    let holder = ctx as *mut ImportCallbackHolder;
+    let holder = ctx as *const ImportCallbackHolder;
     let vm = (*holder).vm;
     let callback = (*holder).callback;
     let base = std::ffi::CStr::from_ptr(base).to_string_lossy();
@@ -166,6 +162,46 @@ unsafe fn to_jsonnet_str(
     std::ptr::copy_nonoverlapping(rust_str.as_ptr(), dst as *mut u8, rust_str.len());
     *dst.offset(rust_str.len() as isize) = 0;
     dst
+}
+
+/// Preferred style for string literals.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StringStyle {
+    /// Prefer double quotes (")
+    Double,
+    /// Prefer signel quotes (')
+    Single,
+    /// Do not change string literals
+    Leave,
+}
+impl StringStyle {
+    pub fn as_i32(&self) -> i32 {
+        match self {
+            Self::Double => 'd' as i32,
+            Self::Single => 's' as i32,
+            Self::Leave => 'l' as i32,
+        }
+    }
+}
+
+/// Preferred style for comments.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CommentStyle {
+    /// Prefer hash (#)
+    Hash,
+    /// Prefer slash (//)
+    Slash,
+    /// Do not change comments
+    Leave,
+}
+impl CommentStyle {
+    pub fn as_i32(&self) -> i32 {
+        match self {
+            Self::Hash => 'h' as i32,
+            Self::Slash => 's' as i32,
+            Self::Leave => 'l' as i32,
+        }
+    }
 }
 
 impl Vm {
@@ -221,8 +257,8 @@ impl Vm {
         unsafe {
             let ptr = gojsonnet_sys::jsonnet_evaluate_snippet(
                 self.inner,
-                filename_cstr.as_ptr() as *mut i8, /* filename is originally declared as "const char *" */
-                code_cstr.as_ptr() as *mut i8, // filename is originally declared as "const char *"
+                filename_cstr.as_ptr(),
+                code_cstr.as_ptr(),
                 &mut err,
             );
             let json_str = std::ffi::CStr::from_ptr(ptr).to_string_lossy();
@@ -273,9 +309,13 @@ impl Vm {
         let name_cstr = std::ffi::CString::new(name)?;
         let mut params_c = Vec::with_capacity(params.len());
         for param in params {
-            params_c.push(std::ffi::CString::new(*param)?.into_raw());
+            params_c.push(std::ffi::CString::new(*param)?);
         }
-        params_c.push(std::ptr::null_mut());
+        let mut params_ptr = Vec::with_capacity(params.len() + 1);
+        for param_c in &params_c {
+            params_ptr.push(param_c.as_ptr());
+        }
+        params_ptr.push(std::ptr::null());
         let holder = Box::into_raw(Box::new(NativeCallbackHolder {
             vm: self.inner,
             callback,
@@ -288,17 +328,12 @@ impl Vm {
             }
             gojsonnet_sys::jsonnet_native_callback(
                 self.inner,
-                name_cstr.as_ptr() as *mut i8, // name is originally declared as "const char *"
+                name_cstr.as_ptr(),
                 Some(native_callback_bridge),
                 holder as *mut std::ffi::c_void,
-                params_c.as_mut_ptr(),
+                params_ptr.as_ptr(),
             );
-            assert_eq!(params_c.pop(), Some(std::ptr::null_mut()));
-            for param_c in params_c {
-                if !param_c.is_null() {
-                    std::ffi::CString::from_raw(param_c);
-                }
-            }
+            assert_eq!(params_ptr.pop(), Some(std::ptr::null()));
         };
         Ok(())
     }
@@ -325,13 +360,7 @@ impl Vm {
     pub fn ext_var(&mut self, key: &str, val: &str) -> Result<(), Error> {
         let key_cstr = std::ffi::CString::new(key)?;
         let val_cstr = std::ffi::CString::new(val)?;
-        unsafe {
-            gojsonnet_sys::jsonnet_ext_var(
-                self.inner,
-                key_cstr.as_ptr() as *mut i8, // key is originally declared as "const char *"
-                val_cstr.as_ptr() as *mut i8, // val is originally declared as "const char *"
-            )
-        };
+        unsafe { gojsonnet_sys::jsonnet_ext_var(self.inner, key_cstr.as_ptr(), val_cstr.as_ptr()) };
         Ok(())
     }
 
@@ -353,11 +382,7 @@ impl Vm {
         let key_cstr = std::ffi::CString::new(key)?;
         let val_cstr = std::ffi::CString::new(val)?;
         unsafe {
-            gojsonnet_sys::jsonnet_ext_code(
-                self.inner,
-                key_cstr.as_ptr() as *mut i8, // key is originally declared as "const char *"
-                val_cstr.as_ptr() as *mut i8, // val is originally declared as "const char *"
-            )
+            gojsonnet_sys::jsonnet_ext_code(self.inner, key_cstr.as_ptr(), val_cstr.as_ptr())
         };
         Ok(())
     }
@@ -384,13 +409,7 @@ impl Vm {
     pub fn tla_var(&mut self, key: &str, val: &str) -> Result<(), Error> {
         let key_cstr = std::ffi::CString::new(key)?;
         let val_cstr = std::ffi::CString::new(val)?;
-        unsafe {
-            gojsonnet_sys::jsonnet_tla_var(
-                self.inner,
-                key_cstr.as_ptr() as *mut i8, // key is originally declared as "const char *"
-                val_cstr.as_ptr() as *mut i8, // val is originally declared as "const char *"
-            )
-        };
+        unsafe { gojsonnet_sys::jsonnet_tla_var(self.inner, key_cstr.as_ptr(), val_cstr.as_ptr()) };
         Ok(())
     }
 
@@ -412,11 +431,7 @@ impl Vm {
         let key_cstr = std::ffi::CString::new(key)?;
         let val_cstr = std::ffi::CString::new(val)?;
         unsafe {
-            gojsonnet_sys::jsonnet_tla_code(
-                self.inner,
-                key_cstr.as_ptr() as *mut i8, // key is originally declared as "const char *"
-                val_cstr.as_ptr() as *mut i8, // val is originally declared as "const char *"
-            )
+            gojsonnet_sys::jsonnet_tla_code(self.inner, key_cstr.as_ptr(), val_cstr.as_ptr())
         };
         Ok(())
     }
@@ -429,10 +444,7 @@ impl Vm {
     /// ```
     pub fn jpath_add(&mut self, path: &str) -> Result<(), Error> {
         let path_cstr = std::ffi::CString::new(path)?;
-        unsafe {
-            // path is originally declared as "const char *"
-            gojsonnet_sys::jsonnet_jpath_add(self.inner, path_cstr.as_ptr() as *mut i8)
-        };
+        unsafe { gojsonnet_sys::jsonnet_jpath_add(self.inner, path_cstr.as_ptr()) };
         Ok(())
     }
 
@@ -467,6 +479,146 @@ impl Vm {
                 holder as *mut std::ffi::c_void,
             )
         };
+    }
+
+    /// Set indentation level for formatting.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.fmt_indent(8);
+    /// let code = vm.fmt_snippet("fmt_indent.jsonnet", "{\nx:1\n}").unwrap();
+    /// assert_eq!(code, "{\n        x: 1,\n}\n");
+    /// ```
+    pub fn fmt_indent(&mut self, n: i32) {
+        unsafe { gojsonnet_sys::jsonnet_fmt_indent(self.inner, n) };
+    }
+
+    /// Set the maximum number of blank lines when formatting.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.fmt_max_blank_lines(1);
+    /// let code = vm
+    ///     .fmt_snippet("fmt_max_blank_lines.jsonnet", "{\nx:1,\n\n\n\ny:2}")
+    ///     .unwrap();
+    /// assert_eq!(code, "{\n  x: 1,\n\n  y: 2,\n}\n");
+    /// ```
+    pub fn fmt_max_blank_lines(&mut self, n: i32) {
+        unsafe { gojsonnet_sys::jsonnet_fmt_max_blank_lines(self.inner, n) };
+    }
+
+    /// Set preferred stlye for string literals when formatting.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.fmt_string(gojsonnet::StringStyle::Double);
+    /// let code = vm.fmt_snippet("fmt_string.jsonnet", "{x:'x'}").unwrap();
+    /// assert_eq!(code, "{ x: \"x\" }\n");
+    /// ```
+    pub fn fmt_string(&mut self, style: StringStyle) {
+        unsafe { gojsonnet_sys::jsonnet_fmt_string(self.inner, style.as_i32()) };
+    }
+
+    /// Set preferred stlye for comments when formatting.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.fmt_comment(gojsonnet::CommentStyle::Hash);
+    /// let code = vm
+    ///     .fmt_snippet("fmt_comment.jsonnet", "// comment\n{x:1}")
+    ///     .unwrap();
+    /// assert_eq!(code, "# comment\n{ x: 1 }\n");
+    /// ```
+    pub fn fmt_comment(&mut self, style: CommentStyle) {
+        unsafe { gojsonnet_sys::jsonnet_fmt_comment(self.inner, style.as_i32()) };
+    }
+
+    /// Whether to add an extra space on the inside of arrays when formatting.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.fmt_pad_arrays(true);
+    /// let code = vm
+    ///     .fmt_snippet("fmt_pad_arrays.jsonnet", "{x:[1,2]}")
+    ///     .unwrap();
+    /// assert_eq!(code, "{ x: [ 1, 2 ] }\n");
+    /// ```
+    pub fn fmt_pad_arrays(&mut self, v: bool) {
+        unsafe { gojsonnet_sys::jsonnet_fmt_pad_arrays(self.inner, v as i32) };
+    }
+
+    /// Whether to add an extra space on the inside of objects when formatting.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.fmt_pad_objects(false);
+    /// let code = vm.fmt_snippet("fmt_pad_objects.jsonnet", "{x:1}").unwrap();
+    /// assert_eq!(code, "{x: 1}\n");
+    /// ```
+    pub fn fmt_pad_objects(&mut self, v: bool) {
+        unsafe { gojsonnet_sys::jsonnet_fmt_pad_objects(self.inner, v as i32) };
+    }
+
+    /// Use syntax sugar where possible with field names when formatting.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.fmt_pretty_field_names(false);
+    /// let code = vm
+    ///     .fmt_snippet("fmt_pretty_field_names.jsonnet", "{'x':1}")
+    ///     .unwrap();
+    /// assert_eq!(code, "{ 'x': 1 }\n");
+    /// ```
+    pub fn fmt_pretty_field_names(&mut self, v: bool) {
+        unsafe { gojsonnet_sys::jsonnet_fmt_pretty_field_names(self.inner, v as i32) };
+    }
+
+    /// Sort top-level imports in alphabetical order when formatting.
+    ///
+    /// ```rust
+    /// let mut vm = gojsonnet::Vm::default();
+    /// vm.fmt_sort_imports(false);
+    /// let code = vm
+    ///     .fmt_snippet(
+    ///         "fmt_sort_imports.jsonnet",
+    ///         "local a = import 'z';\nlocal b = import 'y';\n[a,b]",
+    ///     )
+    ///     .unwrap();
+    /// assert_eq!(
+    ///     code,
+    ///     "local a = import 'z';\nlocal b = import 'y';\n[a, b]\n"
+    /// );
+    /// ```
+    pub fn fmt_sort_imports(&mut self, v: bool) {
+        unsafe { gojsonnet_sys::jsonnet_fmt_sort_imports(self.inner, v as i32) };
+    }
+
+    /// Format a Jsonnet code.
+    ///
+    /// ```rust
+    /// let vm = gojsonnet::Vm::default();
+    /// let code = vm.fmt_snippet("fmt_snippet.jsonnet", "# comment\nlocal a = import 'z';\nlocal b = import 'y';\n{\n'x':1,\n\n\n\ny:\"2\",\na:[1,2]\n}").unwrap();
+    /// assert_eq!(code, "// comment\nlocal b = import 'y';\nlocal a = import 'z';\n{\n  x: 1,\n\n\n  y: '2',\n  a: [1, 2],\n}\n");
+    /// ```
+    pub fn fmt_snippet(&self, filename: &str, snippet: &str) -> Result<String, Error> {
+        let filename_cstr = std::ffi::CString::new(filename)?;
+        let snippet_cstr = std::ffi::CString::new(snippet)?;
+        let mut err = 0;
+        unsafe {
+            let ptr = gojsonnet_sys::jsonnet_fmt_snippet(
+                self.inner,
+                filename_cstr.as_ptr(),
+                snippet_cstr.as_ptr(),
+                &mut err,
+            );
+            let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            gojsonnet_sys::jsonnet_realloc(self.inner, ptr, 0);
+            if err == 0 {
+                Ok(s)
+            } else {
+                Err(Error::GoJsonnetError { message: s })
+            }
+        }
     }
 }
 impl Drop for Vm {
